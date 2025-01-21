@@ -2,7 +2,10 @@ import logging
 import random
 from typing import List
 
+import numpy as np
 import torch
+import torch.nn.functional as F
+import torchaudio
 from torch.utils.data import Dataset
 
 logger = logging.getLogger(__name__)
@@ -18,7 +21,13 @@ class BaseDataset(Dataset):
     """
 
     def __init__(
-        self, index, limit=None, shuffle_index=False, instance_transforms=None
+        self,
+        index,
+        limit=None,
+        target_sr=22050,
+        max_audio_length=None,
+        shuffle_index=False,
+        instance_transforms=None,
     ):
         """
         Args:
@@ -27,6 +36,8 @@ class BaseDataset(Dataset):
                 such as label and object path.
             limit (int | None): if not None, limit the total number of elements
                 in the dataset to 'limit' elements.
+            target_sr (int): target sample rate.
+            max_audio_length (int): max length of audio
             shuffle_index (bool): if True, shuffle the index. Uses python
                 random package with seed 42.
             instance_transforms (dict[Callable] | None): transforms that
@@ -34,6 +45,9 @@ class BaseDataset(Dataset):
                 tensor name.
         """
         self._assert_index_is_valid(index)
+
+        self.target_sr = target_sr
+        self.max_audio_length = max_audio_length
 
         index = self._shuffle_and_limit_index(index, limit, shuffle_index)
         self._index: List[dict] = index
@@ -57,10 +71,18 @@ class BaseDataset(Dataset):
         """
         data_dict = self._index[ind]
         data_path = data_dict["path"]
-        data_object = self.load_object(data_path)
-        data_label = data_dict["label"]
+        if "spectrogram" in data_path and "audio" in data_path:
+            spectrogram = data_path["spectrogram"]
+            audio = data_path["audio"]
+        else:
+            audio = self.load_audio(data_path)
+            spectrogram = self.get_spectrogram(audio)
 
-        instance_data = {"data_object": data_object, "labels": data_label}
+        instance_data = {
+            "spectrogram": spectrogram,
+            "audio": audio,
+            "length": spectrogram.size(1),
+        }
         instance_data = self.preprocess_data(instance_data)
 
         return instance_data
@@ -71,17 +93,49 @@ class BaseDataset(Dataset):
         """
         return len(self._index)
 
-    def load_object(self, path):
+    def load_audio(self, path):
         """
         Load object from disk.
 
         Args:
-            path (str): path to the object.
+            path (str): path to the audio.
         Returns:
-            data_object (Tensor):
+            audio (Tensor):
         """
-        data_object = torch.load(path)
-        return data_object
+        audio_tensor, sr = torchaudio.load(path)
+        audio_tensor = audio_tensor[0:1, :]
+        target_sr = self.target_sr
+
+        if sr != target_sr:
+            audio_tensor = torchaudio.functional.resample(audio_tensor, sr, target_sr)
+
+        if self.max_audio_length is not None:
+            if audio_tensor.size(1) >= self.max_audio_length:
+                max_audio_start = audio_tensor.size(1) - self.max_audio_length
+                audio_start = random.randint(0, max_audio_start)
+                audio_tensor = audio_tensor[
+                    :, audio_start : audio_start + self.max_audio_length
+                ]
+            else:
+                audio_tensor = F.pad(
+                    audio_tensor,
+                    (0, self.max_audio_length - audio_tensor.size(1)),
+                    "constant",
+                )
+        return audio_tensor
+
+    def get_spectrogram(self, audio):
+        """
+        Special instance transform with a special key to
+        get spectrogram from audio.
+
+        Args:
+            audio (Tensor): original audio.
+
+        Returns:
+            spectrogram (Tensor): spectrogram for the audio.
+        """
+        return torch.log(self.instance_transforms["get_spectrogram"](audio) + 1e-5)
 
     def preprocess_data(self, instance_data):
         """
@@ -99,6 +153,8 @@ class BaseDataset(Dataset):
         """
         if self.instance_transforms is not None:
             for transform_name in self.instance_transforms.keys():
+                if transform_name == "get_spectrogram":
+                    continue
                 instance_data[transform_name] = self.instance_transforms[
                     transform_name
                 ](instance_data[transform_name])
@@ -139,12 +195,9 @@ class BaseDataset(Dataset):
                 such as label and object path.
         """
         for entry in index:
-            assert "path" in entry, (
-                "Each dataset item should include field 'path'" " - path to audio file."
-            )
-            assert "label" in entry, (
-                "Each dataset item should include field 'label'"
-                " - object ground-truth label."
+            assert "path" in entry or "spectrogram" in entry(
+                "Each dataset item should include field 'path' or 'spectrogram'"
+                "- path to audio file or spectrogram respectively."
             )
 
     @staticmethod
