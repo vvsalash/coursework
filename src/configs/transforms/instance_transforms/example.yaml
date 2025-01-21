@@ -1,6 +1,22 @@
 train:
-  data_object: # name of the tensor on which we apply transform
-    _target_: torchvision.transforms.v2.Compose
-    transforms:
-      - _target_: src.transforms.RandomScale1D
-inference: null
+  get_spectrogram:
+    _target_: torchaudio.transforms.MelSpectrogram
+    sample_rate: 22050
+    n_fft: 1024
+    win_length: 1024
+    hop_length: 256
+    n_mels: 80
+    f_max: 8000
+    center: False
+    pad: 384
+inference:
+  get_spectrogram:
+    _target_: torchaudio.transforms.MelSpectrogram
+    sample_rate: 22050
+    n_fft: 1024
+    win_length: 1024
+    hop_length: 256
+    n_mels: 80
+    f_max: 8000
+    center: False
+    pad: 384

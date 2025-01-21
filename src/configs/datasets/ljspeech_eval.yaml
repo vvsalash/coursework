@@ -1,0 +1,5 @@
+test:
+  _target_: src.datasets.LJspeechDataset
+  part: test
+  limit: 10
+  instance_transforms: ${transforms.instance_transforms.train}
