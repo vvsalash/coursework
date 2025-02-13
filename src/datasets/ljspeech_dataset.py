@@ -91,3 +91,9 @@ class LJspeechDataset(BaseDataset):
             with index_path.open("w") as f:
                 json.dump(index, f, indent=2)
         return index
+
+
+class LJspeechTTSDataset(LJspeechDataset):
+    def __getitem__(self, ind):
+        data_dict = self._index[ind]
+        return self.preprocess_data({"text": data_dict.get("text", "").strip()})

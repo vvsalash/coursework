@@ -1,0 +1,19 @@
+defaults:
+  - datasets: ljspeech_tts
+  - _self_
+
+tts:
+  seed: 42
+  device: "auto"
+  limit: 10
+  sample_rate: 22050
+
+  fastspeech2:
+    source: "speechbrain/tts-fastspeech2-ljspeech"
+    savedir: "pretrained_models/tts-fastspeech2-ljspeech"
+
+  hifigan:
+    source: "speechbrain/tts-hifigan-ljspeech"
+    savedir: "pretrained_models/tts-hifigan-ljspeech"
+
+  output_dir: "data/saved/tts_outputs"

@@ -10,6 +10,7 @@ comet_ml
 hydra-core
 speechbrain
 torchaudio
+transformers
 
 black
 isort

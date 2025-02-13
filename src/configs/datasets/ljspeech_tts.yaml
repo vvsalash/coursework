@@ -1,0 +1,3 @@
+_target_: src.datasets.ljspeech_dataset.LJspeechTTSDataset
+part: test
+limit: 10

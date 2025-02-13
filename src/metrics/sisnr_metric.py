@@ -2,6 +2,10 @@ import torch
 
 from src.metrics.base_metric import BaseMetric
 
+# macs, flops, rtf, stoi, pesq, csig, cbak, covl,
+
+# https://github.com/SamsungLabs/hifi_plusplus/blob/main/metric_denoising.py#L13
+
 
 class SISNRMetric(BaseMetric):
     """
