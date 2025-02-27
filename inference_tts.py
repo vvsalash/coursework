@@ -1,3 +1,4 @@
+import time
 import warnings
 from pathlib import Path
 
@@ -9,6 +10,13 @@ from speechbrain.inference.TTS import FastSpeech2 as BaseFastSpeech2
 from speechbrain.inference.vocoders import HIFIGAN
 
 from src.datasets.ljspeech_dataset import LJspeechTTSDataset
+from src.metrics.tts_metrics import (
+    CompositeMetric,
+    PESQMetric,
+    RTFMetric,
+    SSNRMetric,
+    STOIMetric,
+)
 from src.utils.init_utils import set_random_seed
 
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -72,6 +80,12 @@ def main(config: DictConfig):
         limit=config.tts.limit,
     )
 
+    comp_metric = CompositeMetric()
+    pesq_metric = PESQMetric(sample_rate=config.tts.sample_rate, mode="wb")
+    ssnr_metric = SSNRMetric(sample_rate=config.tts.sample_rate)
+    stoi_metric = STOIMetric(sample_rate=config.tts.sample_rate)
+    rtf_metric = RTFMetric()
+
     for idx, sample in enumerate(dataset):
         text = sample.get("text", "").strip()
         if not text:
@@ -79,6 +93,7 @@ def main(config: DictConfig):
             continue
 
         print(f"Synthesizing audio for sample {idx}: {text}")
+        start_time = time.time()
         try:
             result = fastspeech2.encode_text(text)
             if len(result) == 5:
@@ -90,6 +105,7 @@ def main(config: DictConfig):
         except Exception as e:
             print(f"Error during text encoding: {e}")
             continue
+        infer_time = time.time() - start_time
 
         wav = hifigan.decode_batch(mel_outputs).cpu()
         if wav.dim() == 3:
@@ -105,6 +121,20 @@ def main(config: DictConfig):
         output_path = output_dir / f"sample_{idx}.wav"
         torchaudio.save(str(output_path), waveform, config.tts.sample_rate)
         print(f"Saved synthesized audio to {output_path}")
+
+        audio_duration = waveform.shape[-1] / config.tts.sample_rate
+
+        print("Metrics:")
+
+        metrics_result = {
+            "composite": comp_metric(output_audio=waveform, reference_audio=waveform),
+            "pesq": pesq_metric(output_audio=waveform, reference_audio=waveform),
+            "ssnr": ssnr_metric(output_audio=waveform, reference_audio=waveform),
+            "stoi": stoi_metric(output_audio=waveform, reference_audio=waveform),
+            "rtf": rtf_metric(infer_time=infer_time, audio_duration=audio_duration),
+        }
+        print(f"Metrics for sample {idx}: {metrics_result}")
+    print("Done TTS inference.")
 
 
 if __name__ == "__main__":
