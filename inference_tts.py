@@ -16,6 +16,7 @@ from src.metrics.tts_metrics import (
     RTFMetric,
     SSNRMetric,
     STOIMetric,
+    UTMOSScore
 )
 from src.utils.init_utils import set_random_seed
 
@@ -86,6 +87,9 @@ def main(config: DictConfig):
     stoi_metric = STOIMetric(sample_rate=config.tts.sample_rate)
     rtf_metric = RTFMetric()
 
+    device = torch.device('cuda:0') if torch.cuda.is_available() else torch.device('cpu')
+    mos_metric = UTMOSScore(device)
+
     for idx, sample in enumerate(dataset):
         text = sample.get("text", "").strip()
         if not text:
@@ -132,6 +136,7 @@ def main(config: DictConfig):
             "ssnr": ssnr_metric(output_audio=waveform, reference_audio=waveform),
             "stoi": stoi_metric(output_audio=waveform, reference_audio=waveform),
             "rtf": rtf_metric(infer_time=infer_time, audio_duration=audio_duration),
+            "mos": mos_metric.score(waveform)
         }
         print(f"Metrics for sample {idx}: {metrics_result}")
     print("Done TTS inference.")
