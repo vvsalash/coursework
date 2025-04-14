@@ -27,27 +27,69 @@ class FastSpeech2Wrapper(BaseFastSpeech2):
     """
     Обёртка для FastSpeech2, которая гарантирует,
     что входной текст преобразуется в нужный формат.
-
-    Если вызывается encode_text с одиночной строкой или списком строк,
-    то метод encode_input преобразует их в список словарей с ключом "txt".
     """
 
     def encode_text(self, text):
-        # Если вход – одиночная строка, оборачиваем её в список
         if isinstance(text, str):
             text = [text]
         return super().encode_text(text)
 
     def encode_input(self, data):
-        # Если ключ "txt" содержит список строк, преобразуем их в список словарей
         if (
-            "txt" in data
-            and isinstance(data["txt"], list)
-            and data["txt"]
-            and isinstance(data["txt"][0], str)
+                "txt" in data
+                and isinstance(data["txt"], list)
+                and data["txt"]
+                and isinstance(data["txt"][0], str)
         ):
             data["txt"] = [{"txt": t} for t in data["txt"]]
         return super().encode_input(data)
+
+
+def chunked_vocoder_decode(mel_outputs, hifigan, chunk_size, overlap_frames, hop_length):
+    """
+    Разбивает мел-спектрограмму на чанки с перекрытием и декодирует каждый через вокодер.
+
+    Аргументы:
+        mel_outputs: torch.Tensor формы (1, T, n_mels)
+        hifigan: вокодер с методом decode_batch
+        chunk_size: число кадров мел-спектрограммы на один чанк (без учета перекрытия)
+        overlap_frames: число перекрывающих кадров с каждой стороны
+        hop_length: число аудиосемплов, соответствующее одному кадру (frame shift)
+
+    Возвращает:
+        waveform: результирующий аудиосигнал после последовательного декодирования
+    """
+    mel = mel_outputs[0]
+    T = mel.shape[0]
+    waveform_chunks = []
+    overlap_samples = overlap_frames * hop_length
+
+    starts = list(range(0, T, chunk_size))
+    num_chunks = len(starts)
+
+    for i, start in enumerate(starts):
+        if i == 0:
+            chunk_start = 0
+            chunk_end = min(T, start + chunk_size + overlap_frames)
+        else:
+            chunk_start = max(0, start - overlap_frames)
+            chunk_end = min(T, start + chunk_size + overlap_frames)
+        mel_chunk = mel[chunk_start:chunk_end].unsqueeze(0)
+        wav_chunk = hifigan.decode_batch(mel_chunk).cpu()
+        if wav_chunk.dim() == 3:
+            wav_chunk = wav_chunk[0]
+        elif wav_chunk.dim() == 1:
+            wav_chunk = wav_chunk.unsqueeze(0)
+        if i == 0 and num_chunks > 1:
+            wav_chunk = wav_chunk[:, : -overlap_samples]
+        elif i == num_chunks - 1 and i != 0:
+            wav_chunk = wav_chunk[:, overlap_samples:]
+        elif i != 0:
+            wav_chunk = wav_chunk[:, overlap_samples: -overlap_samples]
+
+        waveform_chunks.append(wav_chunk)
+    waveform = torch.cat(waveform_chunks, dim=-1)
+    return waveform
 
 
 @hydra.main(version_base=None, config_path="src/configs", config_name="inference_tts")
@@ -90,6 +132,12 @@ def main(config: DictConfig):
     device = torch.device('cuda:0') if torch.cuda.is_available() else torch.device('cpu')
     mos_metric = UTMOSScore(device)
 
+    chunk_size = config.tts.get("chunk_size", 100)
+    overlap_frames = config.tts.get("overlap_frames", 10)
+    hop_length = config.tts.get("hop_length", 240)
+
+    result_mos = 0
+    length = 0
     for idx, sample in enumerate(dataset):
         text = sample.get("text", "").strip()
         if not text:
@@ -109,37 +157,61 @@ def main(config: DictConfig):
         except Exception as e:
             print(f"Error during text encoding: {e}")
             continue
-        infer_time = time.time() - start_time
+        fastspeech_infer_time = time.time() - start_time
 
-        wav = hifigan.decode_batch(mel_outputs).cpu()
-        if wav.dim() == 3:
-            waveform = wav[0]
-        elif wav.dim() == 2:
-            waveform = wav
-        elif wav.dim() == 1:
-            waveform = wav.unsqueeze(0)
-        else:
-            print(f"Unexpected waveform dimension: {wav.shape}")
-            continue
+        start_time = time.time()
+        wav_baseline = hifigan.decode_batch(mel_outputs).cpu()
+        if wav_baseline.dim() == 3:
+            waveform_baseline = wav_baseline[0]
+        elif wav_baseline.dim() == 2:
+            waveform_baseline = wav_baseline
+        elif wav_baseline.dim() == 1:
+            waveform_baseline = wav_baseline.unsqueeze(0)
+        baseline_vocoder_time = time.time() - start_time
 
-        output_path = output_dir / f"sample_{idx}.wav"
-        torchaudio.save(str(output_path), waveform, config.tts.sample_rate)
-        print(f"Saved synthesized audio to {output_path}")
+        baseline_total_time = fastspeech_infer_time + baseline_vocoder_time
 
-        audio_duration = waveform.shape[-1] / config.tts.sample_rate
+        baseline_output_path = output_dir / f"sample_{idx}_baseline.wav"
+        torchaudio.save(str(baseline_output_path), waveform_baseline, config.tts.sample_rate)
+        print(f"Saved baseline synthesized audio to {baseline_output_path}")
 
-        print("Metrics:")
+        start_time = time.time()
+        waveform_chunked = chunked_vocoder_decode(mel_outputs, hifigan, chunk_size, overlap_frames, hop_length)
+        chunked_vocoder_time = time.time() - start_time
 
-        metrics_result = {
-            "composite": comp_metric(output_audio=waveform, reference_audio=waveform),
-            "pesq": pesq_metric(output_audio=waveform, reference_audio=waveform),
-            "ssnr": ssnr_metric(output_audio=waveform, reference_audio=waveform),
-            "stoi": stoi_metric(output_audio=waveform, reference_audio=waveform),
-            "rtf": rtf_metric(infer_time=infer_time, audio_duration=audio_duration),
-            "mos": mos_metric.score(waveform)
+        chunked_total_time = fastspeech_infer_time + chunked_vocoder_time
+
+        chunked_output_path = output_dir / f"sample_{idx}_chunked.wav"
+        torchaudio.save(str(chunked_output_path), waveform_chunked, config.tts.sample_rate)
+        print(f"Saved chunked synthesized audio to {chunked_output_path}")
+
+        audio_duration_baseline = waveform_baseline.shape[-1] / config.tts.sample_rate
+        audio_duration_chunked = waveform_chunked.shape[-1] / config.tts.sample_rate
+
+        metrics_baseline = {
+            "composite": comp_metric(output_audio=waveform_baseline, reference_audio=waveform_baseline),
+            "pesq": pesq_metric(output_audio=waveform_baseline, reference_audio=waveform_baseline),
+            "ssnr": ssnr_metric(output_audio=waveform_baseline, reference_audio=waveform_baseline),
+            "stoi": stoi_metric(output_audio=waveform_baseline, reference_audio=waveform_baseline),
+            "rtf": rtf_metric(infer_time=baseline_total_time, audio_duration=audio_duration_baseline),
+            "mos": mos_metric.score(waveform_baseline)
         }
-        print(f"Metrics for sample {idx}: {metrics_result}")
-    print("Done TTS inference.")
+        result_mos += metrics_baseline['mos']
+        length += 1
+        print(f"Baseline Metrics for sample {idx}: {metrics_baseline}")
+
+        metrics_chunked = {
+            "composite": comp_metric(output_audio=waveform_chunked, reference_audio=waveform_chunked),
+            "pesq": pesq_metric(output_audio=waveform_chunked, reference_audio=waveform_chunked),
+            "ssnr": ssnr_metric(output_audio=waveform_chunked, reference_audio=waveform_chunked),
+            "stoi": stoi_metric(output_audio=waveform_chunked, reference_audio=waveform_chunked),
+            "rtf": rtf_metric(infer_time=chunked_total_time, audio_duration=audio_duration_chunked),
+            "mos": mos_metric.score(waveform_chunked)
+        }
+        print(f"Chunked Metrics for sample {idx}: {metrics_chunked}")
+
+    print(f"Result avg MOS = {result_mos / length}")
+    print("Done TTS inference experiments.")
 
 
 if __name__ == "__main__":
